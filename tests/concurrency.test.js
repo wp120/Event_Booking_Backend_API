@@ -18,15 +18,7 @@ const userIds = [
   "69635b9d84963d0202592e9c",
 ];
 
-// Promise.all([sendRequest(), sendRequest(), sendRequest(), sendRequest()])
-// Promise.all(userIds.map((userId) => sendRequest(userId)))
-//   .then((res) =>
-//     console.log(
-//       "Responses: ",
-//       res.map((r) => r.status + " " + r.data.message)
-//     )
-//   )
-//   .catch((err) => console.log("Error: ", err.response?.data?.message));
+//Promise.allSettled is used instead of Promise.all because we need to print responses of all requests irrespective of fullfilled or rejected.
 
 Promise.allSettled(userIds.map((userId) => sendRequest(userId))).then(
   (results) => {

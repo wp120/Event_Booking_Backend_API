@@ -13,10 +13,6 @@ const userRouter = require("./routes/userRoutes");
 const eventRouter = require("./routes/eventRoutes");
 const bookingRouter = require("./routes/bookingRoutes");
 
-// app.get("/", (req, res) => {
-//   res.send("Hello World");
-// });
-
 app.use("/auth", userRouter);
 
 app.use("/events", eventRouter);
