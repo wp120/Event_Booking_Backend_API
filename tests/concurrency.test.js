@@ -4,7 +4,7 @@ const URL = "http://localhost:3000/bookings";
 
 const sendRequest = (userId) => {
   const payload = {
-    eventId: "69634b5afe17f740dd7a02ad",
+    eventId: "69635174461ac2c2f23a5da0",
     noOfSeats: 1,
   };
 

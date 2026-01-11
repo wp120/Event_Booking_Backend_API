@@ -24,14 +24,31 @@ module.exports.createBooking = async (req, res) => {
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
-    if (event.availableSeats < noOfSeats) {
-      return res.status(400).json({ message: "Not enough seats available" });
+    // if (event.availableSeats < noOfSeats) {
+    //   return res.status(400).json({ message: "Not enough seats available" });
+    // }
+    // if (new Date(event.startTime) < new Date()) {
+    //   return res.status(400).json({ message: "Event has already started" });
+    // }
+    // event.availableSeats -= noOfSeats;
+    // await event.save();
+
+    const updatedEvent = await Event.findOneAndUpdate(
+      {
+        _id: eventId,
+        availableSeats: { $gte: noOfSeats },
+      },
+      {
+        $inc: { availableSeats: -noOfSeats },
+      },
+      { new: true }
+    );
+
+    if (!updatedEvent) {
+      return res.status(400).json({
+        message: "Not enough seats available",
+      });
     }
-    if (new Date(event.startTime) < new Date()) {
-      return res.status(400).json({ message: "Event has already started" });
-    }
-    event.availableSeats -= noOfSeats;
-    await event.save();
 
     const booking = await Booking.create({ eventId, noOfSeats, userId });
     return res.status(201).json({ booking });
