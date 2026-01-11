@@ -51,7 +51,9 @@ module.exports.createBooking = async (req, res) => {
     }
 
     const booking = await Booking.create({ eventId, noOfSeats, userId });
-    return res.status(201).json({ booking });
+    return res
+      .status(201)
+      .json({ message: "Booking created Successfully.", booking });
   } catch (err) {
     return res
       .status(500)

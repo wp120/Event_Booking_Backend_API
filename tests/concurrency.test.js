@@ -4,26 +4,38 @@ const URL = "http://localhost:3000/bookings";
 
 const sendRequest = (userId) => {
   const payload = {
-    eventId: "69635174461ac2c2f23a5da0",
+    eventId: "69635f3fd7a20f2e504d7859",
     noOfSeats: 1,
   };
 
-  axios.post(URL, payload, { headers: { "x-user-id": userId } });
+  return axios.post(URL, payload, { headers: { "x-user-id": userId } });
 };
 
 const userIds = [
-  "69634771a4f63cdc0d41bff1",
-  "696347b0a4f63cdc0d41bff3",
-  "696347c9a4f63cdc0d41bff5",
-  "696347e3a4f63cdc0d41bff7",
+  "69635b47f0e40a452f7e3b3e",
+  "69635b64845c19f495df383f",
+  "69635b875bf83c73e9b9453b",
+  "69635b9d84963d0202592e9c",
 ];
 
 // Promise.all([sendRequest(), sendRequest(), sendRequest(), sendRequest()])
-Promise.all(userIds.map((userId) => sendRequest(userId)))
-  .then((res) =>
+// Promise.all(userIds.map((userId) => sendRequest(userId)))
+//   .then((res) =>
+//     console.log(
+//       "Responses: ",
+//       res.map((r) => r.status + " " + r.data.message)
+//     )
+//   )
+//   .catch((err) => console.log("Error: ", err.response?.data?.message));
+
+Promise.allSettled(userIds.map((userId) => sendRequest(userId))).then(
+  (results) => {
     console.log(
-      "Responses: ",
-      res.map((r) => r.status + " " + r.data.message)
-    )
-  )
-  .catch((err) => console.log("Error: ", err.response?.data?.message));
+      results.map((r) =>
+        r.status === "fulfilled"
+          ? `${r.value.status} ${r.value.data.message}`
+          : `${r.reason.response.status} ${r.reason.response.data.message}`
+      )
+    );
+  }
+);
