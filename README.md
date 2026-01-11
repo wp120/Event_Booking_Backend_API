@@ -59,25 +59,25 @@ This project prevents that using:
 
 ## Project Structure
 
-src/
-├── index.js
-├── routes/
-│ ├── userRoutes.js
-│ ├── eventRoutes.js
-│ └── bookingRoutes.js
-├── controllers/
-│ ├── userController.js
-│ ├── eventController.js
-│ └── bookingController.js
-├── models/
-│ ├── User.js
-│ ├── Event.js
-│ └── Booking.js
-└── middlewares/
-└── authMiddleware.js
+src/ \
+├── index.js \
+├── routes/ \
+│ &nbsp;&nbsp; ├── userRoutes.js \
+│ &nbsp;&nbsp; ├── eventRoutes.js \
+│ &nbsp;&nbsp; └── bookingRoutes.js \
+├── controllers/ \
+│ &nbsp;&nbsp; ├── userController.js \
+│ &nbsp;&nbsp; ├── eventController.js \
+│ &nbsp;&nbsp; └── bookingController.js \
+├── models/ \
+│ &nbsp;&nbsp; ├── User.js \
+│ &nbsp;&nbsp; ├── Event.js \
+│ &nbsp;&nbsp; └── Booking.js \
+└── middlewares/ \
+└── authMiddleware.js \
 
-tests/
-└── concurrency.test.js
+tests/ \
+└── concurrency.test.js \
 
 ---
 
