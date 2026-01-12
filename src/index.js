@@ -12,12 +12,15 @@ const mongoose = require("mongoose");
 const userRouter = require("./routes/userRoutes");
 const eventRouter = require("./routes/eventRoutes");
 const bookingRouter = require("./routes/bookingRoutes");
+const waitingListRouter = require("./routes/waitingListRoutes");
 
 app.use("/auth", userRouter);
 
 app.use("/events", eventRouter);
 
 app.use("/bookings", bookingRouter);
+
+app.use("/waitingList", waitingListRouter);
 
 mongoose
   .connect(process.env.MONGODB_CONNECTION_URL)

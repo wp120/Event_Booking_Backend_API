@@ -1,6 +1,7 @@
 const Booking = require("../models/booking.model");
 const Event = require("../models/event.model");
 const User = require("../models/user.model");
+const WaitingList = require("../models/waitingList.model");
 
 module.exports.createBooking = async (req, res) => {
   try {
@@ -39,8 +40,15 @@ module.exports.createBooking = async (req, res) => {
     );
 
     if (!updatedEvent) {
-      return res.status(400).json({
-        message: "Not enough seats available",
+      const waitingList = await WaitingList.create({
+        eventId,
+        noOfSeats,
+        userId,
+      });
+
+      return res.status(202).json({
+        message: "Enough seats not available. Added to waiting list.",
+        waitingList,
       });
     }
 
