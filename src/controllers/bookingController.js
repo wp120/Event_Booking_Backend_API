@@ -2,31 +2,33 @@ const Booking = require("../models/booking.model");
 const Event = require("../models/event.model");
 const User = require("../models/user.model");
 const WaitingList = require("../models/waitingList.model");
+const ApiError = require("../errors/ApiError");
+const mongoose = require("mongoose");
 
 module.exports.createBooking = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
+    session.startTransaction();
+
     const { eventId, noOfSeats, userId } = req.body;
     if (!eventId || !noOfSeats || !userId) {
-      return res.status(400).json({ message: "All fields are required" });
+      throw new ApiError(400, "All fields are required");
     }
 
     if (noOfSeats <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Seats can not be zero or negative" });
+      throw new ApiError(400, "Seats can not be zero or negative");
     }
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    const userExists = await User.exists({ _id: userId }).session(session);
+    if (!userExists) {
+      throw new ApiError(404, "User not found");
     }
 
-    const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
+    const eventExists = await Event.exists({ _id: eventId }).session(session);
+    if (!eventExists) {
+      throw new ApiError(404, "Event not found");
     }
-
-    //below code is re-written to be concurrency-safe.
 
     const updatedEvent = await Event.findOneAndUpdate(
       {
@@ -36,30 +38,43 @@ module.exports.createBooking = async (req, res) => {
       {
         $inc: { availableSeats: -noOfSeats },
       },
-      { new: true }
+      {
+        new: true,
+        session,
+      }
     );
 
     if (!updatedEvent) {
-      const waitingList = await WaitingList.create({
-        eventId,
-        noOfSeats,
-        userId,
-      });
+      const waitingList = await WaitingList.create(
+        [{ eventId, noOfSeats, userId }],
+        { session }
+      );
+
+      await session.commitTransaction();
 
       return res.status(202).json({
         message: "Enough seats not available. Added to waiting list.",
-        waitingList,
+        waitingList: waitingList[0],
       });
     }
 
-    const booking = await Booking.create({ eventId, noOfSeats, userId });
+    const booking = await Booking.create([{ eventId, noOfSeats, userId }], {
+      session,
+    });
+
+    await session.commitTransaction();
+
     return res
       .status(201)
-      .json({ message: "Booking created Successfully.", booking });
+      .json({ message: "Booking created Successfully.", booking: booking[0] });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ message: "Error booking event", error: err.message });
+    await session.abortTransaction();
+
+    return res.status(err.statusCode || 500).json({
+      message: err.message || "Internal Server Error",
+    });
+  } finally {
+    session.endSession();
   }
 };
 
