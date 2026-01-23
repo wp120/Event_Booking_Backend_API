@@ -242,3 +242,38 @@ module.exports.getMyBookings = async (req, res) => {
       .json({ message: "Error fetching bookings", error: err.message });
   }
 };
+
+module.exports.getBookings = async (req, res) => {
+  try {
+    const { eventId, userId } = req.query;
+    const filter = {};
+
+    // Build filter based on query parameters
+    if (eventId) {
+      // Validate event exists
+      const eventExists = await Event.exists({ _id: eventId });
+      if (!eventExists) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      filter.eventId = eventId;
+    }
+
+    if (userId) {
+      // Validate user exists
+      const userExists = await User.exists({ _id: userId });
+      if (!userExists) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      filter.userId = userId;
+    }
+
+    // If no filters provided, return all bookings
+    // Otherwise, return filtered bookings
+    const bookings = await Booking.find(filter);
+    return res.status(200).json({ bookings });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ message: "Error fetching bookings", error: err.message });
+  }
+};
