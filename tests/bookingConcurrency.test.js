@@ -66,30 +66,54 @@ const run = async () => {
       userIds.map((userId) => createBookingRequest(eventId, userId))
     );
 
-    const successes = bookingResults.filter(
-      (r) => {
-        return r.status === "fulfilled" && r.value.status === 201
+    // Log detailed results for debugging
+    console.log("\nDetailed booking results:");
+    bookingResults.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        console.log(
+          `  Request ${index + 1}: Status ${result.value.status} - ${result.value.data?.message || "Success"}`
+        );
+      } else {
+        console.log(
+          `  Request ${index + 1}: REJECTED - ${result.reason?.response?.data?.message || result.reason?.message || "Unknown error"}`
+        );
       }
-    );
-    const failures = bookingResults.filter((r) => {
-      return r.status === "rejected"
     });
+
+    const successes = bookingResults.filter(
+      (r) => r.status === "fulfilled" && r.value.status === 201
+    );
+    const waitingList = bookingResults.filter(
+      (r) => r.status === "fulfilled" && r.value.status === 202
+    );
+    const failures = bookingResults.filter((r) => r.status === "rejected");
 
     const successCount = successes.length;
 
     // Expectation: at most totalSeats bookings should succeed
     const expectedMaxSuccess = 3;
 
-    if (successCount > expectedMaxSuccess) {
+    // Check: If we have available seats, at least some bookings should succeed
+    if (successCount === 0 && waitingList.length === 0 && failures.length === 0) {
+      console.error(
+        `FAILED: No bookings succeeded, but no failures either. This is unexpected.`
+      );
+      testPassed = false;
+    } else if (successCount > expectedMaxSuccess) {
       console.error(
         `FAILED: expected at most ${expectedMaxSuccess} successful bookings, but got ${successCount}`
       );
       testPassed = false;
     } else {
-      // Optional: print high-level outcome
+      // Print detailed outcome
       console.log(
-        `Booking results - success: ${successCount}, failure: ${failures.length}`
+        `\nBooking results - success: ${successCount}, waiting list: ${waitingList.length}, failures: ${failures.length}`
       );
+      if (successCount === 0) {
+        console.warn(
+          `WARNING: No bookings succeeded. This might indicate an issue if seats were available.`
+        );
+      }
       console.log("PASSED");
       testPassed = true;
     }

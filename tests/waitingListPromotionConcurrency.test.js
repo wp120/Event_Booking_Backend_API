@@ -133,14 +133,20 @@ const run = async () => {
     );
 
     // Extract waiting list IDs from 202 responses
-    waitingListIds = waitingListResults
-      .filter(
-        (r) =>
-          r.status === "fulfilled" &&
-          r.value.status === 202 &&
-          r.value.data.waitingList
-      )
-      .map((r) => r.value.data.waitingList._id);
+    try {
+      waitingListIds = waitingListResults
+        .filter(
+          (r) =>
+            r.status === "fulfilled" &&
+            r.value.status === 202 &&
+            r.value.data?.waitingList
+        )
+        .map((r) => r.value.data.waitingList._id);
+    } catch (err) {
+      console.error("Error extracting waiting list IDs:", err);
+      waitingListIds = []; // Ensure it's initialized even on error
+      throw new Error(`Failed to extract waiting list IDs: ${err.message}`);
+    }
 
     if (waitingListIds.length !== 3) {
       throw new Error(
@@ -225,10 +231,10 @@ const run = async () => {
 
     // 7b. Verify bookings were created with waitingListId
     const afterPromotionBookings = await getBookings(eventId);
-    // Initial 3 bookings + 2 promoted = 5 bookings
-    if (afterPromotionBookings.length !== 5) {
+    // We started with 3 bookings, cancelled 2 (deleted), and promoted 2 (created) => still 3 bookings total
+    if (afterPromotionBookings.length !== 3) {
       console.error(
-        `FAILED (Booking count): Expected 5 bookings, got ${afterPromotionBookings.length}`
+        `FAILED (Booking count): Expected 3 bookings, got ${afterPromotionBookings.length}`
       );
       testPassed = false;
     } else {
@@ -253,11 +259,11 @@ const run = async () => {
     }
 
     // Verify no duplicate waitingListId values
-    const waitingListIds = promotedBookings
+    const promotedWaitingListIds = promotedBookings
       .map((b) => b.waitingListId.toString())
       .filter((id) => id);
-    const uniqueWaitingListIds = new Set(waitingListIds);
-    if (waitingListIds.length !== uniqueWaitingListIds.size) {
+    const uniqueWaitingListIds = new Set(promotedWaitingListIds);
+    if (promotedWaitingListIds.length !== uniqueWaitingListIds.size) {
       console.error(
         `FAILED (Duplicate waitingListId): Found duplicate waitingListId values`
       );
@@ -316,10 +322,10 @@ const run = async () => {
 
     // 9. Verify final booking state
     const finalBookings = await getBookings(eventId);
-    // Initial 3 bookings + 3 promoted = 6 bookings
-    if (finalBookings.length !== 6) {
+    // After all cancellations + promotions complete, event should be fully utilized again => 3 bookings total
+    if (finalBookings.length !== 3) {
       console.error(
-        `FAILED (Final booking count): Expected 6 bookings, got ${finalBookings.length}`
+        `FAILED (Final booking count): Expected 3 bookings, got ${finalBookings.length}`
       );
       testPassed = false;
     } else {

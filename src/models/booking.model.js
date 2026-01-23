@@ -12,7 +12,7 @@ const bookingSchema = new mongoose.Schema({
   waitingListId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "WaitingList",
-    default: null,
+    // default: null,
   },
   createdAt: { type: Date, default: Date.now },
 });
