@@ -6,11 +6,11 @@
   "scripts": {
     "serve": "node src/index.js",
     "dev": "nodemon src/index.js",
-
     "test:booking": "node tests/bookingConcurrency.test.js",
     "test:cancel": "node tests/cancelConcurrency.test.js",
     "test:waitlist": "node tests/waitingListPromotionConcurrency.test.js",
-    "test:all": "node tests/bookingConcurrency.test.js && node tests/cancelConcurrency.test.js && node tests/waitingListPromotionConcurrency.test.js"
+    "test:idempotency": "node tests/idempotency.test.js",
+    "test:all": "node tests/bookingConcurrency.test.js && node tests/cancelConcurrency.test.js && node tests/waitingListPromotionConcurrency.test.js && node tests/idempotency.test.js"
   },
   "keywords": [],
   "author": "",
