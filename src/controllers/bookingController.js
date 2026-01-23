@@ -14,6 +14,12 @@ const isWriteConflictError = (error) => {
   );
 };
 
+// Helper function to validate UUID v4 format
+const isValidUUIDv4 = (uuid) => {
+  const uuidv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidv4Regex.test(uuid);
+};
+
 // Helper function for retry logic with exponential backoff
 const retryWithBackoff = async (operation, maxRetries = 3, baseDelay = 50) => {
   let lastError;
@@ -45,6 +51,17 @@ const retryWithBackoff = async (operation, maxRetries = 3, baseDelay = 50) => {
 module.exports.createBooking = async (req, res) => {
   const { eventId, noOfSeats, userId } = req.body;
   
+  // Extract and validate idempotencyKey from headers
+  const idempotencyKey = req.headers["x-idempotency-key"];
+  
+  if (!idempotencyKey) {
+    return res.status(400).json({ message: "idempotencyKey is required in headers" });
+  }
+
+  if (!isValidUUIDv4(idempotencyKey)) {
+    return res.status(400).json({ message: "Invalid idempotencyKey format. Expected UUID v4" });
+  }
+  
   // Validation (outside transaction)
   if (!eventId || !noOfSeats || !userId) {
     return res.status(400).json({ message: "All fields are required" });
@@ -72,6 +89,32 @@ module.exports.createBooking = async (req, res) => {
           throw new ApiError(404, "Event not found");
         }
 
+        // Check for existing booking with same idempotencyKey, userId, eventId
+        const existingBooking = await Booking.findOne({
+          idempotencyKey,
+          userId,
+          eventId,
+        }).session(session);
+
+        if (existingBooking) {
+          await session.commitTransaction();
+          await session.endSession();
+          return { status: 200, data: { message: "Booking already exists (idempotent request).", booking: existingBooking } };
+        }
+
+        // Check for existing waiting list entry with same idempotencyKey, userId, eventId
+        const existingWaitingList = await WaitingList.findOne({
+          idempotencyKey,
+          userId,
+          eventId,
+        }).session(session);
+
+        if (existingWaitingList) {
+          await session.commitTransaction();
+          await session.endSession();
+          return { status: 200, data: { message: "Waiting list entry already exists (idempotent request).", waitingList: existingWaitingList } };
+        }
+
         const updatedEvent = await Event.findOneAndUpdate(
           {
             _id: eventId,
@@ -94,25 +137,65 @@ module.exports.createBooking = async (req, res) => {
             { session }
           );
 
-          const waitingList = await WaitingList.create(
-            [{ eventId, noOfSeats, userId }],
-            { session }
-          );
+          try {
+            const waitingList = await WaitingList.create(
+              [{ eventId, noOfSeats, userId, idempotencyKey }],
+              { session }
+            );
+
+            await session.commitTransaction();
+            await session.endSession();
+
+            return { status: 202, data: { message: "Enough seats not available. Added to waiting list.", waitingList: waitingList[0] } };
+          } catch (createError) {
+            // Handle duplicate key error (race condition)
+            if (createError && createError.code === 11000) {
+              await session.abortTransaction();
+              await session.endSession();
+              
+              // Query and return existing waiting list entry
+              const existingWaitList = await WaitingList.findOne({
+                idempotencyKey,
+                userId,
+                eventId,
+              });
+              
+              if (existingWaitList) {
+                return { status: 200, data: { message: "Waiting list entry already exists (idempotent request).", waitingList: existingWaitList } };
+              }
+            }
+            throw createError;
+          }
+        }
+
+        try {
+          const booking = await Booking.create([{ eventId, noOfSeats, userId, idempotencyKey }], {
+            session,
+          });
 
           await session.commitTransaction();
           await session.endSession();
 
-          return { status: 202, data: { message: "Enough seats not available. Added to waiting list.", waitingList: waitingList[0] } };
+          return { status: 201, data: { message: "Booking created Successfully.", booking: booking[0] } };
+        } catch (createError) {
+          // Handle duplicate key error (race condition)
+          if (createError && createError.code === 11000) {
+            await session.abortTransaction();
+            await session.endSession();
+            
+            // Query and return existing booking
+            const existingBook = await Booking.findOne({
+              idempotencyKey,
+              userId,
+              eventId,
+            });
+            
+            if (existingBook) {
+              return { status: 200, data: { message: "Booking already exists (idempotent request).", booking: existingBook } };
+            }
+          }
+          throw createError;
         }
-
-        const booking = await Booking.create([{ eventId, noOfSeats, userId }], {
-          session,
-        });
-
-        await session.commitTransaction();
-        await session.endSession();
-
-        return { status: 201, data: { message: "Booking created Successfully.", booking: booking[0] } };
       } catch (error) {
         await session.abortTransaction();
         await session.endSession();
@@ -146,14 +229,15 @@ module.exports.cancelBooking = async (req, res) => {
       try {
         session.startTransaction();
 
-        // 1. Fetch booking
+        // 1. Fetch booking (only active bookings can be cancelled)
         const booking = await Booking.findOne({
           _id: bookingId,
           userId,
+          status: "active",
         }).session(session);
 
         if (!booking) {
-          throw new ApiError(404, "Booking not found.");
+          throw new ApiError(404, "Booking not found or already cancelled.");
         }
 
         // 2. Restore seats atomically on the event and increment totalCancelled
@@ -167,8 +251,11 @@ module.exports.cancelBooking = async (req, res) => {
           throw new ApiError(404, "Event not found.");
         }
 
-        // 3. Delete booking
-        await Booking.deleteOne({ _id: booking._id }).session(session);
+        // 3. Update booking status to cancelled
+        await Booking.updateOne(
+          { _id: booking._id },
+          { $set: { status: "cancelled" } }
+        ).session(session);
 
         // 4. Promote waiting-list bookings (skip if it does not fit) using claim-based processing
         while (true) {
@@ -241,6 +328,7 @@ module.exports.cancelBooking = async (req, res) => {
                   userId: wait.userId,
                   eventId: wait.eventId,
                   noOfSeats: wait.noOfSeats,
+                  idempotencyKey: wait.idempotencyKey,
                   waitingListId: wait._id,
                 },
               ],
@@ -282,6 +370,8 @@ module.exports.cancelBooking = async (req, res) => {
 module.exports.getMyBookings = async (req, res) => {
   try {
     const { userId } = req.body;
+    const { status } = req.query;
+    
     if (!userId) {
       return res.status(400).json({ message: "User ID is required" });
     }
@@ -289,7 +379,24 @@ module.exports.getMyBookings = async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    const bookings = await Booking.find({ userId });
+    
+    const filter = { userId };
+    
+    // Handle status filtering
+    if (status) {
+      if (status !== "active" && status !== "cancelled" && status !== "all") {
+        return res.status(400).json({ message: "Invalid status. Must be 'active', 'cancelled', or 'all'" });
+      }
+      if (status !== "all") {
+        filter.status = status;
+      }
+      // If status === "all", don't add status filter (show all)
+    } else {
+      // Default behavior: show only active bookings if no status param
+      filter.status = "active";
+    }
+    
+    const bookings = await Booking.find(filter);
     return res.status(200).json({ bookings });
   } catch (err) {
     return res
@@ -300,7 +407,7 @@ module.exports.getMyBookings = async (req, res) => {
 
 module.exports.getBookings = async (req, res) => {
   try {
-    const { eventId, userId } = req.query;
+    const { eventId, userId, status } = req.query;
     const filter = {};
 
     // Build filter based on query parameters
@@ -320,6 +427,20 @@ module.exports.getBookings = async (req, res) => {
         return res.status(404).json({ message: "User not found" });
       }
       filter.userId = userId;
+    }
+
+    // Handle status filtering
+    if (status) {
+      if (status !== "active" && status !== "cancelled" && status !== "all") {
+        return res.status(400).json({ message: "Invalid status. Must be 'active', 'cancelled', or 'all'" });
+      }
+      if (status !== "all") {
+        filter.status = status;
+      }
+      // If status === "all", don't add status filter (show all)
+    } else {
+      // Default behavior: show only active bookings if no status param
+      filter.status = "active";
     }
 
     // If no filters provided, return all bookings

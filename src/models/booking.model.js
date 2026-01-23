@@ -8,6 +8,13 @@ const bookingSchema = new mongoose.Schema({
     required: true,
   },
   noOfSeats: { type: Number, required: true },
+  idempotencyKey: { type: String, required: true },
+  status: {
+    type: String,
+    enum: ["active", "cancelled"],
+    default: "active",
+    required: true,
+  },
   // Present only for bookings promoted from waiting list
   waitingListId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -24,5 +31,11 @@ bookingSchema.index({ userId: 1 });
 bookingSchema.index({ eventId: 1 });
 // Prevent duplicate promotions of the same waiting-list entry
 bookingSchema.index({ waitingListId: 1 }, { unique: true, sparse: true });
+// Idempotency: unique combination of (idempotencyKey, userId, eventId)
+bookingSchema.index({ idempotencyKey: 1, userId: 1, eventId: 1 }, { unique: true });
+// Status indexes for efficient filtering
+bookingSchema.index({ status: 1 });
+bookingSchema.index({ eventId: 1, status: 1 });
+bookingSchema.index({ userId: 1, status: 1 });
 
 module.exports = Booking;

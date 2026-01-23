@@ -8,6 +8,7 @@ const waitingListSchema = new mongoose.Schema({
     required: true,
   },
   noOfSeats: { type: Number, required: true },
+  idempotencyKey: { type: String, required: true },
   status: {
     type: String,
     enum: ["pending", "processing"],
@@ -29,5 +30,7 @@ waitingListSchema.index({ userId: 1 });
 waitingListSchema.index({ eventId: 1 });
 waitingListSchema.index({ createdAt: 1 });
 waitingListSchema.index({ eventId: 1, status: 1, createdAt: 1 });
+// Idempotency: unique combination of (idempotencyKey, userId, eventId)
+waitingListSchema.index({ idempotencyKey: 1, userId: 1, eventId: 1 }, { unique: true });
 
 module.exports = WaitingList;
