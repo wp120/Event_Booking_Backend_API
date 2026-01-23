@@ -78,7 +78,7 @@ module.exports.createBooking = async (req, res) => {
             availableSeats: { $gte: noOfSeats },
           },
           {
-            $inc: { availableSeats: -noOfSeats },
+            $inc: { availableSeats: -noOfSeats, totalBookings: 1 },
           },
           {
             new: true,
@@ -87,6 +87,13 @@ module.exports.createBooking = async (req, res) => {
         );
 
         if (!updatedEvent) {
+          // Increment totalWaitlisted when adding to waiting list
+          await Event.findOneAndUpdate(
+            { _id: eventId },
+            { $inc: { totalWaitlisted: 1 } },
+            { session }
+          );
+
           const waitingList = await WaitingList.create(
             [{ eventId, noOfSeats, userId }],
             { session }
@@ -149,10 +156,10 @@ module.exports.cancelBooking = async (req, res) => {
           throw new ApiError(404, "Booking not found.");
         }
 
-        // 2. Restore seats atomically on the event
+        // 2. Restore seats atomically on the event and increment totalCancelled
         const updatedEvent = await Event.findOneAndUpdate(
           { _id: booking.eventId },
-          { $inc: { availableSeats: booking.noOfSeats } },
+          { $inc: { availableSeats: booking.noOfSeats, totalCancelled: 1 } },
           { new: true, session }
         );
 
@@ -195,14 +202,14 @@ module.exports.cancelBooking = async (req, res) => {
 
           if (!wait) break;
 
-          // Try to atomically allocate seats for this waiting-list entry
+          // Try to atomically allocate seats for this waiting-list entry and increment totalBookings
           const promotedEvent = await Event.findOneAndUpdate(
             {
               _id: wait.eventId,
               availableSeats: { $gte: wait.noOfSeats },
             },
             {
-              $inc: { availableSeats: -wait.noOfSeats },
+              $inc: { availableSeats: -wait.noOfSeats, totalBookings: 1, totalWaitlisted: -1 },
             },
             {
               new: true,

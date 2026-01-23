@@ -45,6 +45,36 @@ module.exports.getEvents = async (req, res) => {
   }
 };
 
+module.exports.getEventAnalytics = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    
+    if (!eventId) {
+      return res.status(400).json({ message: "Event ID is required" });
+    }
+
+    const event = await Event.findById(eventId);
+    
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const analytics = {
+      eventCapacity: event.totalSeats,
+      availableSeats: event.availableSeats,
+      totalBookings: event.totalBookings || 0,
+      totalCancelled: event.totalCancelled || 0,
+      totalWaitlisted: event.totalWaitlisted || 0,
+    };
+
+    return res.status(200).json({ analytics });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ message: "Error fetching event analytics", error: err.message });
+  }
+};
+
 module.exports.deleteEvent = async (req, res) => {
   const session = await mongoose.startSession();
 

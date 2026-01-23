@@ -5,6 +5,9 @@ const eventSchema = new mongoose.Schema({
   totalSeats: { type: Number, required: true },
   availableSeats: { type: Number, required: true },
   startTime: { type: Date, required: true },
+  totalBookings: { type: Number, default: 0 },
+  totalCancelled: { type: Number, default: 0 },
+  totalWaitlisted: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 });
 
