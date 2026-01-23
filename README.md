@@ -1,11 +1,17 @@
 # Event Booking Backend API
 
 A backend service for booking limited-capacity events, built to demonstrate
-real-world backend engineering concepts such as concurrency handling,
-atomic database updates, and correctness under race conditions.
+real-world backend engineering concepts including concurrency handling,
+atomic database updates, and correctness under race conditions and retries.
 
-This project intentionally goes beyond basic CRUD operations and focuses on
-preventing double booking under concurrent requests.
+---
+
+## Why this project?
+
+This project focuses on correctness under concurrency, retries, and partial failures.
+It demonstrates atomic operations, transactions, and idempotency patterns to ensure
+system invariants are maintained even when multiple requests execute simultaneously
+or when network retries occur. The goal is engineering robustness, not CRUD feature count.
 
 ---
 
@@ -37,18 +43,12 @@ This project prevents that using:
 
 ## Key Concepts Demonstrated
 
-- Atomic operations in MongoDB
-- Race conditions and concurrent requests
-- Safe inventory decrement pattern
-- MongoDB transactions for multi-document operations
-- Retry logic with exponential backoff
-- Idempotency patterns for safe retries
-- Soft deletes with status tracking
-- Claim-based processing for waiting lists
-- Unique indexes for data integrity
-- Validation vs business logic separation
-- Middleware usage
-- Clean backend project structure
+- Atomic conditional updates and transactions
+- Correctness under concurrent requests
+- Idempotent write APIs
+- Claim-based waiting list promotion
+- Data integrity using unique and sparse indexes
+- Separation of validation, business logic, and persistence
 
 ---
 
@@ -171,25 +171,20 @@ to verify that:
 ### How we avoid race conditions
 
 - **Atomic seat updates**  
-  - Both booking creation and cancellation use `findOneAndUpdate` with `$inc` and conditions like
-    `availableSeats: { $gte: noOfSeats }` to ensure seats are never over- or under-counted,
-    even when multiple requests run at the same time.
+  Booking creation and cancellation use `findOneAndUpdate` with `$inc` and conditions
+  like `availableSeats: { $gte: noOfSeats }` to ensure seats are never over- or under-counted.
 
 - **Claim-based waiting-list promotion**  
-  - Each cancellation request generates a unique `cancellationId`.
-  - Waiting-list entries are claimed one-by-one using `findOneAndUpdate` with:
-    - `status: "pending"`
-    - A filter on `processingBy` so the same cancellation does not re-claim an entry it already tried.
-  - If there are not enough seats for a waiting-list entry:
-    - Its `status` is set back to `"pending"`,
-    - `processingBy` is set to the current `cancellationId`,
-    - and the loop continues to the next eligible entry.
-  - This allows **other concurrent cancellations** (with different `cancellationId`s) to still promote that entry if they free enough seats.
+  Each cancellation request generates a unique `cancellationId`. Waiting-list entries
+  are claimed one-by-one using `findOneAndUpdate` with `status: "pending"` and a filter
+  on `processingBy` to prevent re-claiming. If there are not enough seats, the entry's
+  status is reset to `"pending"` and `processingBy` is updated, allowing other concurrent
+  cancellations to promote that entry if they free enough seats.
 
 - **Unique index to prevent double-promotion**
-  - Promoted bookings store `waitingListId` referencing the original waiting-list document.
-  - A **unique sparse index** on `waitingListId` ensures that the same waiting-list entry
-    cannot be turned into a real booking more than once, even if two transactions race.
+  Promoted bookings store `waitingListId` referencing the original waiting-list document.
+  A unique sparse index on `waitingListId` ensures that the same waiting-list entry
+  cannot be turned into a real booking more than once, even if two transactions race.
 
 Together, these patterns demonstrate a realistic, production-style approach to handling
 concurrent cancellation and waiting list promotion without overselling seats or creating
@@ -245,7 +240,7 @@ The booking and cancellation controllers implement retry logic with exponential 
 
 ## Testing
 
-The project includes comprehensive test scripts for validating concurrency safety:
+The project includes test scripts that simulate race conditions and verify correctness:
 
 - **`npm run test:booking`** - Tests concurrent booking creation
 - **`npm run test:cancel`** - Tests concurrent booking cancellation
@@ -253,9 +248,14 @@ The project includes comprehensive test scripts for validating concurrency safet
 - **`npm run test:idempotency`** - Tests idempotency key functionality
 - **`npm run test:all`** - Runs all tests sequentially
 
-All tests:
-- Dynamically create test data (users, events)
-- Run concurrent requests to simulate race conditions
-- Verify correctness and data consistency
-- Clean up test data after completion
-- Provide clear PASS/FAIL results
+---
+
+## Design Trade-offs
+
+- **Redis / queues were intentionally avoided** to rely first on MongoDB guarantees for atomicity and transactions
+- **Transactions are used only where system invariants can break** (e.g., cancellation with waiting list promotion)
+- **Simplicity is preferred** unless extra complexity clearly improves correctness
+
+---
+
+This project emphasizes engineering decision-making and correctness over feature count.
