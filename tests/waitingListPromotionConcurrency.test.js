@@ -1,6 +1,16 @@
 const axios = require("axios");
+const crypto = require("crypto");
 
 const BASE_URL = "http://localhost:3000";
+
+// Configure concurrent cancellation requests for waiting list promotion test
+// Reduced to 25-30 to be more realistic and avoid excessive write conflicts
+const CONCURRENT_CANCEL_REQUESTS = 25;
+
+// Generate UUID v4
+const generateUUID = () => {
+  return crypto.randomUUID();
+};
 
 const createUser = (index) => {
   return axios.post(`${BASE_URL}/auth/register`, {
@@ -10,18 +20,18 @@ const createUser = (index) => {
   });
 };
 
-const createEvent = () => {
+const createEvent = (totalSeats = 3) => {
   // Set startTime to tomorrow to avoid "start time cannot be in the past" validation error
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
   return axios.post(`${BASE_URL}/events`, {
     title: "Waiting List Promotion Test Event",
-    totalSeats: 3,
-    availableSeats: 3,
+    totalSeats: totalSeats,
+    availableSeats: totalSeats,
     startTime: tomorrow.toISOString(),
   });
 };
 
-const createBookingRequest = (eventId, userId) => {
+const createBookingRequest = (eventId, userId, idempotencyKey) => {
   return axios.post(
     `${BASE_URL}/bookings`,
     {
@@ -31,12 +41,13 @@ const createBookingRequest = (eventId, userId) => {
     {
       headers: {
         "x-user-id": userId,
+        "x-idempotency-key": idempotencyKey,
       },
     }
   );
 };
 
-const createWaitingListRequest = (eventId, userId, noOfSeats) => {
+const createWaitingListRequest = (eventId, userId, noOfSeats, idempotencyKey) => {
   // Create a booking request that will fail and go to waiting list
   return axios.post(
     `${BASE_URL}/bookings`,
@@ -47,6 +58,7 @@ const createWaitingListRequest = (eventId, userId, noOfSeats) => {
     {
       headers: {
         "x-user-id": userId,
+        "x-idempotency-key": idempotencyKey,
       },
     }
   );
@@ -95,40 +107,91 @@ const run = async () => {
   let testPassed = true;
 
   try {
+    console.log(`=== Waiting List Promotion Concurrency Test ===`);
+    console.log(`Concurrent cancellation requests: ${CONCURRENT_CANCEL_REQUESTS}\n`);
+
     // 1. Setup: Create users
+    // We need enough users for: bookings + waiting list entries + cancellations
+    const bookingsNeeded = CONCURRENT_CANCEL_REQUESTS;
+    const waitingListNeeded = CONCURRENT_CANCEL_REQUESTS;
+    const userCount = bookingsNeeded + waitingListNeeded + 10; // Extra buffer
     console.log("Setting up test data...");
-    const userCount = 8;
+    console.log(`Creating ${userCount} users...`);
     const userResults = await Promise.all(
       Array.from({ length: userCount }, (_, i) => createUser(i + 1))
     );
     userIds = userResults.map((r) => r.data.user._id);
+    console.log(`✓ Created ${userIds.length} users\n`);
 
-    // 2. Setup: Create event with limited seats
-    const eventRes = await createEvent();
+    // 2. Setup: Create event with enough seats for concurrent testing
+    const eventSeats = bookingsNeeded;
+    console.log(`Creating event with ${eventSeats} seats...`);
+    const eventRes = await createEvent(eventSeats);
     eventId = eventRes.data.event._id;
+    console.log(`✓ Created event\n`);
 
-    // 3. Setup: Create bookings to fill the event (3 seats)
-    console.log("Creating bookings to fill event...");
-    const bookingResults = await Promise.all(
-      userIds.slice(0, 3).map((userId) =>
-        createBookingRequest(eventId, userId)
+    // 3. Setup: Create bookings to fill the event
+    // Send all requests concurrently using Promise.allSettled (no retry logic in test)
+    // Tests should verify correctness, not mask system limitations
+    console.log(`Creating ${bookingsNeeded} bookings to fill event...`);
+    const bookingResults = await Promise.allSettled(
+      userIds.slice(0, bookingsNeeded).map((userId) =>
+        createBookingRequest(eventId, userId, generateUUID())
       )
     );
-    bookingIds = bookingResults
-      .filter((r) => r.status === 201)
-      .map((r) => r.data.booking._id);
 
-    if (bookingIds.length !== 3) {
+    // Extract results
+    const successfulBookings = bookingResults.filter(
+      (r) => r.status === "fulfilled" && r.value.status === 201
+    );
+    const failedBookings = bookingResults.filter((r) => r.status === "rejected");
+    const waitingListBookings = bookingResults.filter(
+      (r) => r.status === "fulfilled" && r.value.status === 202
+    );
+
+    bookingIds = successfulBookings.map((r) => r.value.data.booking._id);
+
+    // CRITICAL VERIFICATION: No overselling (primary correctness criteria)
+    if (bookingIds.length > bookingsNeeded) {
       throw new Error(
-        `Failed to create 3 bookings. Only created ${bookingIds.length}`
+        `CRITICAL: Overselling detected! Created ${bookingIds.length} bookings but event capacity is only ${bookingsNeeded}`
       );
     }
 
-    // 4. Setup: Create waiting list entries (3 entries, 1 seat each)
-    console.log("Creating waiting list entries...");
+    // Log results
+    console.log(`  ✅ Successful bookings: ${bookingIds.length}`);
+    if (waitingListBookings.length > 0) {
+      console.log(`  ⏳ Waiting list entries: ${waitingListBookings.length}`);
+    }
+    if (failedBookings.length > 0) {
+      console.log(`  ❌ Failed requests: ${failedBookings.length}`);
+      // Check if failures are due to write conflicts (expected under high concurrency)
+      const writeConflictErrors = failedBookings.filter((f) => {
+        const message = f.reason?.response?.data?.message || f.reason?.message || "";
+        return message.includes("Write conflict") || message.includes("WriteConflict");
+      });
+      if (writeConflictErrors.length > 0) {
+        console.log(`    (${writeConflictErrors.length} write conflicts - expected under high concurrency)`);
+      }
+    }
+
+    // For this test to proceed, we need enough bookings to cancel
+    // If write conflicts prevented us from creating enough, that's a system limitation
+    if (bookingIds.length < bookingsNeeded) {
+      throw new Error(
+        `Test setup failed: Only created ${bookingIds.length} out of ${bookingsNeeded} bookings needed. ` +
+        `This indicates the system cannot handle ${bookingsNeeded} concurrent requests. ` +
+        `Consider reducing CONCURRENT_CANCEL_REQUESTS or improving system retry logic.`
+      );
+    }
+
+    console.log(`✓ Created ${bookingIds.length} bookings\n`);
+
+    // 4. Setup: Create waiting list entries
+    console.log(`Creating ${waitingListNeeded} waiting list entries...`);
     const waitingListResults = await Promise.allSettled(
-      userIds.slice(3, 6).map((userId) =>
-        createWaitingListRequest(eventId, userId, 1)
+      userIds.slice(bookingsNeeded, bookingsNeeded + waitingListNeeded).map((userId) =>
+        createWaitingListRequest(eventId, userId, 1, generateUUID())
       )
     );
 
@@ -148,13 +211,15 @@ const run = async () => {
       throw new Error(`Failed to extract waiting list IDs: ${err.message}`);
     }
 
-    if (waitingListIds.length !== 3) {
+    if (waitingListIds.length !== waitingListNeeded) {
       throw new Error(
-        `Failed to create 3 waiting list entries. Only created ${waitingListIds.length}`
+        `Failed to create ${waitingListNeeded} waiting list entries. Only created ${waitingListIds.length}`
       );
     }
+    console.log(`✓ Created ${waitingListIds.length} waiting list entries\n`);
 
     // 5. Verify initial state
+    console.log("Verifying initial state...");
     const initialEvent = await getEvent(eventId);
     const initialWaitingList = await getWaitingList(eventId);
 
@@ -164,37 +229,74 @@ const run = async () => {
       );
     }
 
-    if (initialWaitingList.length !== 3) {
+    if (initialWaitingList.length !== waitingListNeeded) {
       throw new Error(
-        `Expected 3 waiting list entries, got ${initialWaitingList.length}`
+        `Expected ${waitingListNeeded} waiting list entries, got ${initialWaitingList.length}`
       );
     }
-
-    console.log("Test data setup complete. Running concurrency tests...");
+    console.log("✓ Initial state verified\n");
+    console.log("Test data setup complete. Running concurrency tests...\n");
 
     // 6. TEST: Concurrent cancellations to trigger waiting list promotion
-    console.log(
-      "Testing concurrent cancellations with waiting list promotion..."
-    );
+    console.log(`\n=== Concurrent Cancellations with Waiting List Promotion ===`);
+    console.log(`Concurrent cancellation requests: ${CONCURRENT_CANCEL_REQUESTS}\n`);
 
-    // Cancel 2 bookings concurrently (should promote 2 waiting list entries)
-    const cancelResults = await Promise.allSettled([
-      cancelBookingRequest(bookingIds[0], userIds[0]),
-      cancelBookingRequest(bookingIds[1], userIds[1]),
-    ]);
+    // Create enough bookings to cancel concurrently
+    // We need at least CONCURRENT_CANCEL_REQUESTS bookings, but we only have 3 initially
+    // So we'll cancel the 2 we have, and create more bookings first if needed
+    const bookingsToCancel = Math.min(CONCURRENT_CANCEL_REQUESTS, bookingIds.length);
+
+    if (bookingsToCancel < CONCURRENT_CANCEL_REQUESTS) {
+      console.log(`Note: Only ${bookingsToCancel} bookings available to cancel (event has ${bookingIds.length} bookings)`);
+      console.log(`Testing with ${bookingsToCancel} concurrent cancellations instead of ${CONCURRENT_CANCEL_REQUESTS}\n`);
+    }
+
+    console.log(`Sending ${bookingsToCancel} concurrent cancellation requests...`);
+    const startTime = Date.now();
+    const cancelResults = await Promise.allSettled(
+      bookingIds.slice(0, bookingsToCancel).map((bookingId, index) =>
+        cancelBookingRequest(bookingId, userIds[index])
+      )
+    );
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    console.log(`✓ All requests completed in ${duration}ms\n`);
 
     const cancelSuccesses = cancelResults.filter(
       (r) => r.status === "fulfilled" && r.value.status === 200
     );
+    const cancelFailures = cancelResults.filter((r) => r.status === "rejected");
 
-    if (cancelSuccesses.length !== 2) {
+    // Display results
+    if (bookingsToCancel <= 10) {
+      console.log("Detailed results:");
+      cancelResults.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          console.log(`  Request ${index + 1}: Status ${result.value.status} - Cancellation successful`);
+        } else {
+          const status = result.reason?.response?.status || "N/A";
+          const message = result.reason?.response?.data?.message || result.reason?.message || "Unknown error";
+          console.log(`  Request ${index + 1}: REJECTED - Status ${status} - ${message}`);
+        }
+      });
+      console.log();
+    } else {
+      console.log("Results Summary:");
+      console.log(`  ✅ Successful cancellations (200): ${cancelSuccesses.length}`);
+      console.log(`  ❌ Failed: ${cancelFailures.length}`);
+      console.log();
+    }
+
+    console.log("Verification:");
+    if (cancelSuccesses.length !== bookingsToCancel) {
       console.error(
-        `FAILED: Expected 2 successful cancellations, got ${cancelSuccesses.length}`
+        `  ✗ FAILED: Expected ${bookingsToCancel} successful cancellations, got ${cancelSuccesses.length}`
       );
       testPassed = false;
     } else {
-      console.log("✓ Both cancellations succeeded");
+      console.log(`  ✓ All ${cancelSuccesses.length} cancellations succeeded`);
     }
+    console.log();
 
     // 7. Verify waiting list promotion
     // Wait a bit for promotion to complete (transactions should handle this, but adding small delay for safety)
@@ -203,43 +305,46 @@ const run = async () => {
     const afterPromotionEvent = await getEvent(eventId);
     const afterPromotionWaitingList = await getWaitingList(eventId);
 
-    // After cancelling 2 bookings (2 seats freed), 2 waiting list entries should be promoted
-    // So: 0 initial + 2 freed - 2 promoted = 0 available seats
-    // And: 3 initial - 2 promoted = 1 waiting list entry remaining
+    // After cancelling bookings, waiting list entries should be promoted
+    // Expected: bookingsToCancel seats freed, bookingsToCancel waiting list entries promoted
+    const expectedRemainingWaitingList = waitingListNeeded - bookingsToCancel;
+    const expectedAvailableSeats = 0; // All seats should be filled after promotion
 
-    if (afterPromotionEvent.availableSeats !== 0) {
+    console.log("Verification:");
+    if (afterPromotionEvent.availableSeats !== expectedAvailableSeats) {
       console.error(
-        `FAILED (Seat allocation): Expected 0 available seats after promotion, got ${afterPromotionEvent.availableSeats}`
+        `  ✗ FAILED (Seat allocation): Expected ${expectedAvailableSeats} available seats after promotion, got ${afterPromotionEvent.availableSeats}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Seat allocation correct: ${afterPromotionEvent.availableSeats} seats available`
+        `  ✓ Seat allocation correct: ${afterPromotionEvent.availableSeats} seats available`
       );
     }
 
-    if (afterPromotionWaitingList.length !== 1) {
+    if (afterPromotionWaitingList.length !== expectedRemainingWaitingList) {
       console.error(
-        `FAILED (Waiting list promotion): Expected 1 waiting list entry remaining, got ${afterPromotionWaitingList.length}`
+        `  ✗ FAILED (Waiting list promotion): Expected ${expectedRemainingWaitingList} waiting list entries remaining, got ${afterPromotionWaitingList.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Waiting list promotion correct: ${afterPromotionWaitingList.length} entry remaining`
+        `  ✓ Waiting list promotion correct: ${afterPromotionWaitingList.length} entry(ies) remaining`
       );
     }
 
     // 7b. Verify bookings were created with waitingListId
     const afterPromotionBookings = await getBookings(eventId);
-    // We started with 3 bookings, cancelled 2 (deleted), and promoted 2 (created) => still 3 bookings total
-    if (afterPromotionBookings.length !== 3) {
+    // We started with bookingsNeeded bookings, cancelled bookingsToCancel, and promoted bookingsToCancel => still bookingsNeeded bookings total
+    const expectedBookingCount = bookingsNeeded;
+    if (afterPromotionBookings.length !== expectedBookingCount) {
       console.error(
-        `FAILED (Booking count): Expected 3 bookings, got ${afterPromotionBookings.length}`
+        `  ✗ FAILED (Booking count): Expected ${expectedBookingCount} bookings, got ${afterPromotionBookings.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Booking count correct: ${afterPromotionBookings.length} bookings`
+        `  ✓ Booking count correct: ${afterPromotionBookings.length} bookings`
       );
     }
 
@@ -247,16 +352,17 @@ const run = async () => {
     const promotedBookings = afterPromotionBookings.filter(
       (b) => b.waitingListId !== null && b.waitingListId !== undefined
     );
-    if (promotedBookings.length !== 2) {
+    if (promotedBookings.length !== bookingsToCancel) {
       console.error(
-        `FAILED (WaitingListId verification): Expected 2 bookings with waitingListId, got ${promotedBookings.length}`
+        `  ✗ FAILED (WaitingListId verification): Expected ${bookingsToCancel} bookings with waitingListId, got ${promotedBookings.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Promoted bookings have waitingListId: ${promotedBookings.length} bookings`
+        `  ✓ Promoted bookings have waitingListId: ${promotedBookings.length} bookings`
       );
     }
+    console.log();
 
     // Verify no duplicate waitingListId values
     const promotedWaitingListIds = promotedBookings
@@ -272,20 +378,30 @@ const run = async () => {
       console.log("✓ No duplicate waitingListId values found");
     }
 
-    // 8. TEST: Cancel remaining booking and verify final promotion
-    console.log("Testing final cancellation and promotion...");
-    const finalCancelResult = await cancelBookingRequest(
-      bookingIds[2],
-      userIds[2]
-    );
-
-    if (finalCancelResult.status !== 200) {
-      console.error(
-        `FAILED: Final cancellation failed with status ${finalCancelResult.status}`
+    // 8. TEST: Cancel remaining bookings and verify final promotion
+    // Cancel all remaining bookings (if any)
+    const remainingBookings = bookingIds.slice(bookingsToCancel);
+    if (remainingBookings.length > 0) {
+      console.log(`Testing final cancellation and promotion (${remainingBookings.length} remaining booking(s))...`);
+      const finalCancelResults = await Promise.allSettled(
+        remainingBookings.map((bookingId, index) =>
+          cancelBookingRequest(bookingId, userIds[bookingsToCancel + index])
+        )
       );
-      testPassed = false;
-    } else {
-      console.log("✓ Final cancellation succeeded");
+
+      const finalCancelSuccesses = finalCancelResults.filter(
+        (r) => r.status === "fulfilled" && r.value.status === 200
+      );
+
+      if (finalCancelSuccesses.length !== remainingBookings.length) {
+        console.error(
+          `  ✗ FAILED: Expected ${remainingBookings.length} successful cancellations, got ${finalCancelSuccesses.length}`
+        );
+        testPassed = false;
+      } else {
+        console.log(`  ✓ All ${finalCancelSuccesses.length} final cancellations succeeded`);
+      }
+      console.log();
     }
 
     // Wait for promotion
@@ -294,43 +410,42 @@ const run = async () => {
     const finalEvent = await getEvent(eventId);
     const finalWaitingList = await getWaitingList(eventId);
 
-    // After cancelling the last booking (1 seat freed), the last waiting list entry should be promoted
-    // So: 0 available + 1 freed - 1 promoted = 0 available seats
-    // And: 1 waiting list entry - 1 promoted = 0 waiting list entries
-
+    // After all cancellations, all waiting list entries should be promoted
+    // Expected: 0 available seats, 0 waiting list entries
+    console.log("Final State Verification:");
     if (finalEvent.availableSeats !== 0) {
       console.error(
-        `FAILED (Final seat allocation): Expected 0 available seats, got ${finalEvent.availableSeats}`
+        `  ✗ FAILED (Final seat allocation): Expected 0 available seats, got ${finalEvent.availableSeats}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Final seat allocation correct: ${finalEvent.availableSeats} seats available`
+        `  ✓ Final seat allocation correct: ${finalEvent.availableSeats} seats available`
       );
     }
 
     if (finalWaitingList.length !== 0) {
       console.error(
-        `FAILED (Final waiting list): Expected 0 waiting list entries, got ${finalWaitingList.length}`
+        `  ✗ FAILED (Final waiting list): Expected 0 waiting list entries, got ${finalWaitingList.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Final waiting list correct: ${finalWaitingList.length} entries remaining`
+        `  ✓ Final waiting list correct: ${finalWaitingList.length} entries remaining`
       );
     }
 
     // 9. Verify final booking state
     const finalBookings = await getBookings(eventId);
-    // After all cancellations + promotions complete, event should be fully utilized again => 3 bookings total
-    if (finalBookings.length !== 3) {
+    // After all cancellations + promotions complete, event should be fully utilized again
+    if (finalBookings.length !== bookingsNeeded) {
       console.error(
-        `FAILED (Final booking count): Expected 3 bookings, got ${finalBookings.length}`
+        `  ✗ FAILED (Final booking count): Expected ${bookingsNeeded} bookings, got ${finalBookings.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ Final booking count correct: ${finalBookings.length} bookings`
+        `  ✓ Final booking count correct: ${finalBookings.length} bookings`
       );
     }
 
@@ -338,16 +453,17 @@ const run = async () => {
     const allPromotedBookings = finalBookings.filter(
       (b) => b.waitingListId !== null && b.waitingListId !== undefined
     );
-    if (allPromotedBookings.length !== 3) {
+    if (allPromotedBookings.length !== bookingsNeeded) {
       console.error(
-        `FAILED (Final waitingListId verification): Expected 3 bookings with waitingListId, got ${allPromotedBookings.length}`
+        `  ✗ FAILED (Final waitingListId verification): Expected ${bookingsNeeded} bookings with waitingListId, got ${allPromotedBookings.length}`
       );
       testPassed = false;
     } else {
       console.log(
-        `✓ All promoted bookings have waitingListId: ${allPromotedBookings.length} bookings`
+        `  ✓ All promoted bookings have waitingListId: ${allPromotedBookings.length} bookings`
       );
     }
+    console.log();
 
     // Verify no duplicate waitingListId values (unique index guardrail)
     const allWaitingListIds = allPromotedBookings

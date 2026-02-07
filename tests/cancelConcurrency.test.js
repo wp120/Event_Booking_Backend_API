@@ -1,6 +1,15 @@
 const axios = require("axios");
+const crypto = require("crypto");
 
 const BASE_URL = "http://localhost:3000";
+
+// Configure concurrent request count for Scenario A (same booking cancellation)
+const CONCURRENT_CANCEL_REQUESTS = 50;
+
+// Generate UUID v4
+const generateUUID = () => {
+  return crypto.randomUUID();
+};
 
 const createUser = (index) => {
   return axios.post(`${BASE_URL}/auth/register`, {
@@ -21,7 +30,7 @@ const createEvent = () => {
   });
 };
 
-const createBookingRequest = (eventId, userId) => {
+const createBookingRequest = (eventId, userId, idempotencyKey) => {
   return axios.post(
     `${BASE_URL}/bookings`,
     {
@@ -31,6 +40,7 @@ const createBookingRequest = (eventId, userId) => {
     {
       headers: {
         "x-user-id": userId,
+        "x-idempotency-key": idempotencyKey,
       },
     }
   );
@@ -84,7 +94,7 @@ const run = async () => {
     // Create 3 bookings (1 seat each) to fully book the event
     const bookingResults = await Promise.all(
       userIds.slice(0, 3).map((userId) =>
-        createBookingRequest(eventId, userId)
+        createBookingRequest(eventId, userId, generateUUID())
       )
     );
     bookingIds = bookingResults
@@ -111,15 +121,21 @@ const run = async () => {
     console.log("Test data setup complete. Running concurrency tests...");
 
     // 5. TEST SCENARIO A: Concurrent cancellation of the SAME booking
-    console.log("Scenario A: Testing concurrent cancellation of same booking...");
+    console.log(`\n=== Scenario A: Concurrent Cancellation of Same Booking ===`);
+    console.log(`Concurrent requests: ${CONCURRENT_CANCEL_REQUESTS}\n`);
     const sameBookingId = bookingIds[0];
     const sameBookingOwnerId = userIds[0];
 
+    console.log(`Sending ${CONCURRENT_CANCEL_REQUESTS} concurrent cancellation requests for the same booking...`);
+    const startTimeA = Date.now();
     const sameBookingCancelResults = await Promise.allSettled(
-      Array.from({ length: 5 }, () =>
+      Array.from({ length: CONCURRENT_CANCEL_REQUESTS }, () =>
         cancelBookingRequest(sameBookingId, sameBookingOwnerId)
       )
     );
+    const endTimeA = Date.now();
+    const durationA = endTimeA - startTimeA;
+    console.log(`✓ All requests completed in ${durationA}ms\n`);
 
     const sameBookingSuccesses = sameBookingCancelResults.filter(
       (r) => r.status === "fulfilled" && r.value.status === 200
@@ -129,16 +145,47 @@ const run = async () => {
         r.status === "rejected" &&
         r.reason?.response?.status === 404
     );
+    const otherFailures = sameBookingCancelResults.filter(
+      (r) =>
+        r.status === "rejected" &&
+        r.reason?.response?.status !== 404
+    );
+
+    // Display results
+    if (CONCURRENT_CANCEL_REQUESTS <= 10) {
+      console.log("Detailed results:");
+      sameBookingCancelResults.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          console.log(`  Request ${index + 1}: Status ${result.value.status} - Cancellation successful`);
+        } else {
+          const status = result.reason?.response?.status || "N/A";
+          const message = result.reason?.response?.data?.message || result.reason?.message || "Unknown error";
+          console.log(`  Request ${index + 1}: REJECTED - Status ${status} - ${message}`);
+        }
+      });
+      console.log();
+    } else {
+      console.log("Results Summary:");
+      console.log(`  ✅ Successful cancellations (200): ${sameBookingSuccesses.length}`);
+      console.log(`  ❌ Not found (404): ${sameBookingNotFound.length}`);
+      if (otherFailures.length > 0) {
+        console.log(`  ❌ Other failures: ${otherFailures.length}`);
+      }
+      console.log();
+    }
 
     // Expectation: Only 1 cancellation should succeed, rest should be 404
+    console.log("Verification:");
     if (sameBookingSuccesses.length !== 1) {
       console.error(
-        `FAILED (Scenario A): Expected exactly 1 successful cancellation, got ${sameBookingSuccesses.length}`
+        `  ✗ FAILED: Expected exactly 1 successful cancellation, got ${sameBookingSuccesses.length}`
       );
       testPassed = false;
     } else {
-      console.log("✓ Scenario A passed: Exactly 1 cancellation succeeded");
+      console.log(`  ✓ Exactly 1 cancellation succeeded (as expected)`);
+      console.log(`  ✓ ${sameBookingNotFound.length} requests correctly returned 404 (booking already cancelled)`);
     }
+    console.log();
 
     // 6. Verify seat restoration after Scenario A
     const afterScenarioAEvent = await getEvent(eventId);

@@ -21,39 +21,41 @@ const isValidUUIDv4 = (uuid) => {
 };
 
 // Helper function for retry logic with exponential backoff
-const retryWithBackoff = async (operation, maxRetries = 3, baseDelay = 50) => {
+// Increased to 5 retries with 75ms base delay to better handle concurrent write conflicts
+// Retry delays: 75ms, 150ms, 300ms, 600ms, 1200ms (max ~2.3s total)
+const retryWithBackoff = async (operation, maxRetries = 5, baseDelay = 75) => {
   let lastError;
-  
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await operation();
     } catch (error) {
       lastError = error;
-      
+
       // Only retry on write conflict errors or transaction abort errors
-      const isRetryableError = 
-        isWriteConflictError(error) || 
+      const isRetryableError =
+        isWriteConflictError(error) ||
         error?.message?.includes("Transaction") && error?.message?.includes("aborted");
-      
+
       if (!isRetryableError || attempt === maxRetries - 1) {
         throw error;
       }
-      
-      // Exponential backoff: 50ms, 100ms, 200ms
+
+      // Exponential backoff: 75ms, 150ms, 300ms, 600ms, 1200ms
       const delay = baseDelay * Math.pow(2, attempt);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
-  
+
   throw lastError;
 };
 
 module.exports.createBooking = async (req, res) => {
   const { eventId, noOfSeats, userId } = req.body;
-  
+
   // Extract and validate idempotencyKey from headers
   const idempotencyKey = req.headers["x-idempotency-key"];
-  
+
   if (!idempotencyKey) {
     return res.status(400).json({ message: "idempotencyKey is required in headers" });
   }
@@ -61,7 +63,7 @@ module.exports.createBooking = async (req, res) => {
   if (!isValidUUIDv4(idempotencyKey)) {
     return res.status(400).json({ message: "Invalid idempotencyKey format. Expected UUID v4" });
   }
-  
+
   // Validation (outside transaction)
   if (!eventId || !noOfSeats || !userId) {
     return res.status(400).json({ message: "All fields are required" });
@@ -75,7 +77,7 @@ module.exports.createBooking = async (req, res) => {
   try {
     const result = await retryWithBackoff(async () => {
       const session = await mongoose.startSession();
-      
+
       try {
         session.startTransaction();
 
@@ -152,14 +154,14 @@ module.exports.createBooking = async (req, res) => {
             if (createError && createError.code === 11000) {
               await session.abortTransaction();
               await session.endSession();
-              
+
               // Query and return existing waiting list entry
               const existingWaitList = await WaitingList.findOne({
                 idempotencyKey,
                 userId,
                 eventId,
               });
-              
+
               if (existingWaitList) {
                 return { status: 200, data: { message: "Waiting list entry already exists (idempotent request).", waitingList: existingWaitList } };
               }
@@ -182,14 +184,14 @@ module.exports.createBooking = async (req, res) => {
           if (createError && createError.code === 11000) {
             await session.abortTransaction();
             await session.endSession();
-            
+
             // Query and return existing booking
             const existingBook = await Booking.findOne({
               idempotencyKey,
               userId,
               eventId,
             });
-            
+
             if (existingBook) {
               return { status: 200, data: { message: "Booking already exists (idempotent request).", booking: existingBook } };
             }
@@ -216,7 +218,7 @@ module.exports.cancelBooking = async (req, res) => {
   const userId = req.body.userId;
 
   // Validation (outside transaction)
-  if(!bookingId || !userId){
+  if (!bookingId || !userId) {
     return res.status(400).json({ message: "Booking Id and User Id are required." });
   }
 
@@ -371,7 +373,7 @@ module.exports.getMyBookings = async (req, res) => {
   try {
     const { userId } = req.body;
     const { status } = req.query;
-    
+
     if (!userId) {
       return res.status(400).json({ message: "User ID is required" });
     }
@@ -379,9 +381,9 @@ module.exports.getMyBookings = async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    
+
     const filter = { userId };
-    
+
     // Handle status filtering
     if (status) {
       if (status !== "active" && status !== "cancelled" && status !== "all") {
@@ -395,7 +397,7 @@ module.exports.getMyBookings = async (req, res) => {
       // Default behavior: show only active bookings if no status param
       filter.status = "active";
     }
-    
+
     const bookings = await Booking.find(filter);
     return res.status(200).json({ bookings });
   } catch (err) {

@@ -128,7 +128,7 @@ const run = async () => {
     // Test 4: Same idempotency key should return same booking (status 200 on subsequent requests)
     console.log("Test 4: Testing idempotency for successful booking...");
     const idempotencyKey1 = generateUUID();
-    
+
     // First request - should create booking (status 201)
     const firstRequest = await createBookingRequest(eventId, userId, idempotencyKey1);
     if (firstRequest.status !== 201) {
@@ -208,7 +208,7 @@ const run = async () => {
     await createBookingRequest(fullEventId, userId, generateUUID());
 
     const waitingListKey = generateUUID();
-    
+
     // First request - should add to waiting list (status 202)
     const firstWaitRequest = await createBookingRequest(fullEventId, userId, waitingListKey);
     if (firstWaitRequest.status !== 202) {
@@ -234,21 +234,51 @@ const run = async () => {
 
     // Test 7: Concurrent requests with same idempotency key should only create one booking
     console.log("Test 7: Testing concurrent requests with same idempotency key...");
+    const CONCURRENT_IDEMPOTENCY_REQUESTS = 50;
     const concurrentKey = generateUUID();
     const concurrentEventRes = await createEvent(10);
     const concurrentEventId = concurrentEventRes.data.event._id;
     eventIds.push(concurrentEventId);
 
-    // Fire 5 concurrent requests with same idempotency key
+    console.log(`  Sending ${CONCURRENT_IDEMPOTENCY_REQUESTS} concurrent requests with same idempotency key...`);
+    const startTime = Date.now();
     const concurrentResults = await Promise.allSettled(
-      Array.from({ length: 5 }, () => createBookingRequest(concurrentEventId, userId, concurrentKey))
+      Array.from({ length: CONCURRENT_IDEMPOTENCY_REQUESTS }, () => createBookingRequest(concurrentEventId, userId, concurrentKey))
     );
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    console.log(`  ✓ All requests completed in ${duration}ms\n`);
 
     const successful = concurrentResults.filter(
       (r) => r.status === "fulfilled" && (r.value.status === 201 || r.value.status === 200)
     );
     const failed = concurrentResults.filter((r) => r.status === "rejected");
 
+    // Display results
+    if (CONCURRENT_IDEMPOTENCY_REQUESTS <= 10) {
+      console.log("  Detailed results:");
+      concurrentResults.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          console.log(`    Request ${index + 1}: Status ${result.value.status}`);
+        } else {
+          const status = result.reason?.response?.status || "N/A";
+          const message = result.reason?.response?.data?.message || result.reason?.message || "Unknown error";
+          console.log(`    Request ${index + 1}: REJECTED - Status ${status} - ${message}`);
+        }
+      });
+      console.log();
+    } else {
+      const created = successful.filter((r) => r.value.status === 201);
+      const idempotent = successful.filter((r) => r.value.status === 200);
+
+      console.log("  Results Summary:");
+      console.log(`    ✅ Created (201): ${created.length}`);
+      console.log(`    ✅ Idempotent (200): ${idempotent.length}`);
+      console.log(`    ❌ Failed: ${failed.length}`);
+      console.log();
+    }
+
+    // Verification
     if (successful.length === 0) {
       console.error(`  ✗ FAILED: All ${concurrentResults.length} concurrent requests failed`);
       testPassed = false;
